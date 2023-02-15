@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::prelude::*;
+use std::io::BufWriter;
 use std::{
     fs::{self, File},
     io,
@@ -114,11 +117,11 @@ impl Seller {
 
     pub async fn goto(&self, url: &str) {
         self.driver.goto(url).await.expect("前往{url}失败");
-        let delay = Duration::new(60, 0);
-        self.driver
-            .set_page_load_timeout(delay)
-            .await
-            .expect("设置页面加载时间失败");
+        // let delay = Duration::new(60, 0);
+        // self.driver
+        //     .set_page_load_timeout(delay)
+        //     .await
+        //     .expect("设置页面加载时间失败");
     }
 
     pub fn wait_for_password(&self) {
@@ -136,41 +139,58 @@ impl Seller {
         for id in self.start..=self.end {
             self.set_price(id).await;
             // 保存设置售价记录
-            let selled_string =
-                serde_json::to_string(&self.selled).expect("将售价设置记录转化为json文本失败");
+            let selled_string = match serde_json::to_string(&self.selled) {
+                Ok(s) => s,
+                Err(_) => {
+                    log("将售价设置记录转化为json文本失败");
+                    panic!("将售价设置记录转化为json文本失败");
+                }
+            };
             if !Path::new("selled.json").exists() {
                 File::create("selled.json").expect("创建售价设置记录文件失败");
             }
-            fs::write("selled.json", &selled_string).expect("售价设置记录写入失败");
+
+            if let Err(_) = fs::write("selled.json", &selled_string) {
+                log("售价设置记录写入失败");
+                panic!("售价设置记录写入失败");
+            }
         }
+        drop(self);
+        // self.driver.quit().await.expect("msg");
     }
 
     pub async fn set_price(&mut self, id: usize) {
-        let wait_time = 1000;
+        let wait_time = 10;
         if self.selled.items.contains(&id) {
             println!("{}已经设置过,跳过", id);
             return;
         }
         let url = format!("{}{}", self.address, id);
-
+        // 页面转到id所在的地址内
         self.goto(&url).await;
 
-        let sell_button = self
-            .driver
-            .query(By::Css(
-                "button[class='sc-29427738-0 sc-788bb508-0 brbNiF bBXuZv']",
-            ))
-            .or(By::Css(
-                "a[class='sc-1f719d57-0 fKAlPV sc-29427738-0 sc-788bb508-0 brbNiF bBXuZv']",
-            ))
-            .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
-            .first()
-            .await
-            .expect("获取售价按钮失败");
-        self.driver
-            .set_page_load_timeout(Duration::from_secs(wait_time))
-            .await
-            .expect("获取售价按钮class设置等待页面时间失败");
+        // 无限等待页面找到售卖按钮
+        let sell_button = loop {
+            match self
+                .driver
+                .query(By::Css(
+                    "button[class='sc-29427738-0 sc-788bb508-0 brbNiF bBXuZv']",
+                ))
+                .or(By::Css(
+                    "a[class='sc-1f719d57-0 fKAlPV sc-29427738-0 sc-788bb508-0 brbNiF bBXuZv']",
+                ))
+                .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
+                .first()
+                .await
+            {
+                Ok(s) => break s,
+                Err(_) => {
+                    println!("获取售卖按钮失败");
+                    log("获取售卖按钮失败");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
 
         match sell_button
             .attr("class")
@@ -186,100 +206,197 @@ impl Seller {
                 }
                 if name == "sc-1f719d57-0 fKAlPV sc-29427738-0 sc-788bb508-0 brbNiF bBXuZv" {
                     // 未卖出
-                    sell_button.click().await.expect("点击售卖按钮失败");
+                    if let Err(_) = sell_button.click().await {
+                        log("点击售卖按钮失败");
+                        println!("点击售卖按钮失败");
+                    }
                 }
             }
         }
         // 填写价格并提交
         // <input aria-invalid="false" id="price" name="price" placeholder="金额" value="" style="cursor: text;">
-        let input_price = self
-            .driver
-            .query(By::Id("price"))
-            .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
-            .first()
-            .await
-            .expect("检索价格表单失败");
-        input_price
-            .send_keys(self.price.to_string())
-            .await
-            .expect("提交价格表单失败");
+        let input_price = loop {
+            match self
+                .driver
+                .query(By::Id("price"))
+                .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
+                .first()
+                .await
+            {
+                Ok(s) => break s,
+                Err(_) => {
+                    println!("获取input_price失败");
+                    log("获取input_price失败");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
+
+        if let Err(_) = input_price.send_keys(self.price.to_string()).await {
+            log("提交价格表单失败");
+            panic!("提交价格表单失败");
+        }
+
         println!("{}设置价格为:{}", id, self.price.to_string());
 
         // 点击提交按键
         // <button type="submit" width="100%" class="sc-29427738-0 sc-788bb508-0 kqzAEQ bBXuZv">Complete listing</button>
-        let submit_price = self
-            .driver
-            .query(By::Css("button[type='submit']"))
-            .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
-            .first()
-            .await
-            .expect("检索提交按钮失败");
+        let submit_price = loop {
+            match self
+                .driver
+                .query(By::Css("button[type='submit']"))
+                .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
+                .first()
+                .await
+            {
+                Ok(s) => break s,
+                Err(_) => {
+                    println!("检索提交按钮失败");
+                    log("检索提交按钮失败");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
 
         // 切换窗口
+        let mut windows = loop {
+            match self.driver.windows().await {
+                Ok(s) => break s,
+                Err(_) => {
+                    log("获取窗口数量失败");
+                    println!("获取窗口数量失败");
+                    sleep(Duration::from_secs(1)).await;
+                }
+            };
+        };
 
-        let mut windows = self.driver.windows().await.expect("获取窗口数量失败");
         let org_len = windows.len();
-        submit_price.click().await.expect("点击提交按钮失败");
-        self.driver
-            .set_page_load_timeout(Duration::from_secs(wait_time))
-            .await
-            .expect("设置页面加载时间失败");
+        if let Err(_) = submit_price.click().await {
+            log("点击提交按钮失败");
+            panic!("点击提交按钮失败");
+        }
 
         // 切换窗口4
         loop {
-            windows = self.driver.windows().await.expect("等待签名窗口出现失败");
+            windows = loop {
+                match self.driver.windows().await {
+                    Ok(s) => break s,
+                    Err(_) => {
+                        log("等待签名窗口出现失败,继续等待..");
+                        println!("等待签名窗口出现失败");
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            };
+
             if windows.len() != org_len {
-                self.driver
+                if let Err(_) = self
+                    .driver
                     .switch_to_window(windows[windows.len() - 1].clone())
                     .await
-                    .expect("切换签名窗口失败");
+                {
+                    log("切换签名窗口失败");
+                    println!("切换签名窗口失败");
+                }
                 break;
             }
             sleep(Duration::from_secs(1)).await;
         }
-        self.driver
-            .set_page_load_timeout(Duration::from_secs(wait_time))
-            .await
-            .expect("设置页面加载时间失败");
 
         // 点击滚轮
-        let arrow_down = self
-            .driver
-            .query(By::Css("i[class='fa fa-arrow-down']"))
-            .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
-            .first()
-            .await
-            .expect("获取签名窗口滚轮按键失败");
-        arrow_down.click().await.expect("点击滚轮按键失败");
+        let arrow_down = loop {
+            match self
+                .driver
+                .query(By::Css("i[class='fa fa-arrow-down']"))
+                .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
+                .first()
+                .await
+            {
+                Ok(s) => break s,
+                Err(_) => {
+                    log("获取签名窗口滚轮按键失败");
+                    println!("获取签名窗口滚轮按键失败");
+                    sleep(Duration::from_secs(1)).await;
+                }
+            }
+        };
+
+        if let Err(_) = arrow_down.click().await {
+            log("点击滚轮按键失败");
+            panic!("点击滚轮按键失败");
+        }
 
         // 点击签名
         // <button class="button btn--rounded btn-primary" data-testid="signature-sign-button" role="button" tabindex="0">签名</button>
-        let sign = self
-            .driver
-            .query(By::Css("button[data-testid='signature-sign-button']"))
-            .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
-            .first()
-            .await
-            .expect("获取签名按钮失败");
-        sign.click().await.expect("点击签名按钮失败");
+        let sign = loop {
+            match self
+                .driver
+                .query(By::Css("button[data-testid='signature-sign-button']"))
+                .wait(Duration::from_secs(wait_time), Duration::from_secs(1))
+                .first()
+                .await
+            {
+                Ok(s) => break s,
+                Err(_) => {
+                    log("获取签名按钮失败");
+                    println!("获取签名按钮失败");
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
+        if let Err(_) = sign.click().await {
+            log("点击签名按钮失败");
+            panic!("点击签名按钮失败");
+        }
         println!("进行签名操作..");
-        self.driver
-            .set_page_load_timeout(Duration::from_secs(wait_time))
-            .await
-            .expect("设置页面加载时间失败");
+
         // 结束后返回
         loop {
             sleep(Duration::from_secs(1)).await;
-            windows = self.driver.windows().await.expect("等待签名窗口消失失败");
+            windows = match self.driver.windows().await {
+                Ok(s) => s,
+                Err(_) => {
+                    log("等待签名窗口消失失败");
+                    panic!("等待签名窗口消失失败");
+                }
+            };
+
             if windows.len() == org_len {
                 break;
             }
         }
-        self.driver
-            .switch_to_window(windows[0].clone())
-            .await
-            .expect("切换回原始窗口失败");
+        if let Err(_) = self.driver.switch_to_window(windows[0].clone()).await {
+            log("切换回原始窗口失败");
+            panic!("切换回原始窗口失败");
+        }
+
         self.selled.items.push(id);
         println!("{}设置售价完成", id);
+        log(&format!("{}设置售价完成", id));
     }
+}
+
+pub fn log(contents: &str) {
+    let file_path = "log.txt";
+    // 判断文件是否存在
+    // OpenOptions::new().create(true).append(true).open("/tmp/dst")
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+    {
+        Ok(f) => f,
+        Err(_) => {
+            // 文件不存在，创建文件
+            let f = File::create(&file_path).expect("无法创建文件");
+            // 将内容写入文件
+            let mut writer = BufWriter::new(f);
+            writer.write_all(contents.as_bytes()).expect("写入文件失败");
+            return;
+        }
+    };
+
+    // 文件存在，在文件尾部追加内容
+    file.write_all(b"\n").expect("写入文件失败");
+    file.write_all(contents.as_bytes()).expect("写入文件失败");
 }
